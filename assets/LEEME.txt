@@ -1,0 +1,16 @@
+LOGO PARA LOS REPORTES PDF
+==========================
+
+Coloca aquí el logo de la empresa con el nombre:  logo.png
+
+Si usas otro nombre o extensión, cámbialo en:  src/config/marca.ts  (constante LOGO_ARCHIVO)
+
+Notas:
+- pdfkit solo admite PNG y JPG (no SVG). Si tu logo es SVG, expórtalo a PNG.
+- Se recomienda PNG con fondo transparente, de al menos 200x200 px.
+- Se dibuja ajustado a una caja de 32x32 pt en los reportes y 38x38 pt en el ticket
+  de órdenes, conservando la proporción.
+- Si el archivo no existe, los PDF salen igual, solo con el nombre "TRIASO".
+
+Este archivo es distinto al del frontend: el PDF se genera en el servidor y necesita
+su propia copia. El del sitio web va en  triaso_front/public/
