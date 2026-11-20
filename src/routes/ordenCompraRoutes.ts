@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { body } from 'express-validator'
 import { OrdenCompraController } from '../controllers/OrdenCompraController'
 import { handleInputErrors } from '../middleware/validation'
-import { authenticate, checkModulo, checkPermiso } from '../middleware/auth'
+import { authenticate, checkModulo } from '../middleware/auth'
 
 const router = Router()
 
@@ -22,14 +22,6 @@ router.post(
     OrdenCompraController.crearOrden
 )
 
-// Limpiar órdenes completadas con +90 días — requiere el permiso limpiarHistoriales
-router.delete(
-    '/limpiar/completadas',
-    checkModulo('ordenes', 'escritura'),
-    checkPermiso('limpiarHistoriales'),
-    OrdenCompraController.limpiarCompletadas
-)
-
 router.put('/:id', checkModulo('ordenes', 'escritura'), OrdenCompraController.actualizarOrden)
 
 // Marcar como enviada (con opción de disparar el correo)
@@ -40,6 +32,9 @@ router.put('/:id/faltantes', checkModulo('ordenes', 'escritura'), OrdenCompraCon
 
 // Confirmar recepción (fija costo real y suma stock al inventario)
 router.put('/:id/confirmar', checkModulo('ordenes', 'escritura'), OrdenCompraController.confirmarRecepcion)
+
+// Cancelar la orden conservando el registro (borrador o enviada)
+router.put('/:id/cancelar', checkModulo('ordenes', 'escritura'), OrdenCompraController.cancelarOrden)
 
 // Descargar el ticket/factura en PDF
 router.get('/:id/pdf', checkModulo('ordenes', 'lectura'), OrdenCompraController.descargarPDF)

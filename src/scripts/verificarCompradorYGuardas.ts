@@ -50,7 +50,7 @@ async function main() {
     console.log('  GET  /componentes  :', ok((await code(H, 'GET', '/componentes')) === 403))
     console.log('  GET  /historial    :', ok((await code(H, 'GET', '/historial')) === 403))
     console.log('  GET  /usuarios     :', ok((await code(H, 'GET', '/usuarios')) === 403))
-    console.log('  DELETE limpiar órdenes SIN permiso:', ok((await code(H, 'DELETE', '/ordenes/limpiar/completadas')) === 403))
+    console.log('  Limpieza masiva de órdenes retirada (404):', ok((await code(H, 'DELETE', '/ordenes/limpiar/completadas')) === 404))
 
     await fetch(`${BASE}/usuarios/${c.id}`, { method: 'DELETE', headers: A })
     console.log('\n(usuario de prueba eliminado)')

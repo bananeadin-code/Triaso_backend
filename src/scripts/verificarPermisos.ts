@@ -55,7 +55,7 @@ async function main() {
     console.log('Cotizador GET órdenes:', ok((await code(H.cotizador, 'GET', '/ordenes')) === 200))
     console.log('Cotizador GET inventario (lectura interna):', ok((await code(H.cotizador, 'GET', '/inventario')) === 200))
     console.log('Cotizador POST inventario (bloq):', ok((await code(H.cotizador, 'POST', '/inventario', { material: '000000000000000000000000', cantidad: 1 })) === 403))
-    console.log('Cotizador DELETE limpiar canceladas SIN permiso (bloq):', ok((await code(H.cotizador, 'DELETE', '/cotizaciones/limpiar/canceladas')) === 403))
+    console.log('Limpieza masiva de cotizaciones retirada (404):', ok((await code(H.cotizador, 'DELETE', '/cotizaciones/limpiar/canceladas')) === 404))
     console.log('Cotizador GET reporte SIN permiso (bloq):', ok((await code(H.cotizador, 'GET', '/reportes/ordenes')) === 403))
 
     // Capturista: catálogos sí; cotizaciones/órdenes no; reporte con permiso sí
@@ -72,7 +72,8 @@ async function main() {
     // Auto-perfil (cotizador cambia su nombre y contraseña)
     console.log('\n=== AUTO-PERFIL (cotizador) ===')
     console.log('Cambiar nombre:', ok((await code(H.cotizador, 'PUT', '/auth/perfil', { nombre: 'Cotizador Editado' })) === 200))
-    console.log('Cambiar contraseña con actual MALA (bloq):', ok((await code(H.cotizador, 'PUT', '/auth/perfil/password', { actual: 'malísima', nueva: 'nueva123' })) === 401))
+    // 400 (no 401): un error de tecleo no debe cerrar la sesión en el front
+    console.log('Cambiar contraseña con actual MALA (bloq, 400):', ok((await code(H.cotizador, 'PUT', '/auth/perfil/password', { actual: 'malísima', nueva: 'nueva123' })) === 400))
     console.log('Cambiar contraseña con actual OK:', ok((await code(H.cotizador, 'PUT', '/auth/perfil/password', { actual: 'clave123', nueva: 'nueva123' })) === 200))
     console.log('Login con la NUEVA contraseña:', ok((await login('t_cotizador@triaso.com', 'nueva123')) !== null))
 

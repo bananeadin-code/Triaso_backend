@@ -1,15 +1,18 @@
 import { Types } from 'mongoose'
-import Historial from '../models/Historial'
+import Historial, { AccionHistorial, SectorHistorial, TipoHistorial } from '../models/Historial'
 import Componente from '../models/Componente'
 import Equipo from '../models/Equipo'
 
-// Máximo de registros que se conservan (los más recientes). Fuente única: la usan
-// el podado al registrar y el límite de lectura del HistorialController.
-export const MAX_REGISTROS = 50
+// Máximo de registros que se conservan POR SECTOR (los más recientes de cada uno).
+// Cada sector poda su propio historial, así uno ruidoso no desplaza al de otro.
+export const MAX_POR_SECTOR = 50
 
 export interface DatosHistorial {
     usuario?: string
-    tipo: 'componente' | 'equipo' | 'material'
+    tipo: TipoHistorial
+    sector?: SectorHistorial
+    accion?: AccionHistorial
+    entidad?: string
     componente?: Types.ObjectId | string
     componenteConcepto?: string
     equipo?: Types.ObjectId | string
@@ -23,12 +26,24 @@ export interface DatosHistorial {
     critico?: boolean
 }
 
-// Crea el registro y conserva solo los MAX_REGISTROS más recientes.
+// Sector por defecto según el tipo (por si el llamador no lo especifica)
+const SECTOR_POR_TIPO: Record<TipoHistorial, SectorHistorial> = {
+    componente: 'catalogos',
+    material: 'catalogos',
+    proveedor: 'catalogos',
+    equipo: 'bom',
+    importacion: 'catalogos',
+    usuario: 'sistema',
+    sistema: 'sistema',
+}
+
+// Crea el registro y conserva solo los MAX_POR_SECTOR más recientes DE ESE SECTOR.
 export async function registrarHistorial(datos: DatosHistorial) {
     if (!datos.cambios || datos.cambios.length === 0) return
-    await Historial.create({ usuario: 'Sistema', ...datos } as never)
+    const sector = datos.sector ?? SECTOR_POR_TIPO[datos.tipo] ?? 'catalogos'
+    await Historial.create({ usuario: 'Sistema', ...datos, sector } as never)
 
-    const sobrantes = await Historial.find().sort({ createdAt: -1 }).skip(MAX_REGISTROS).select('_id')
+    const sobrantes = await Historial.find({ sector }).sort({ createdAt: -1 }).skip(MAX_POR_SECTOR).select('_id')
     if (sobrantes.length > 0) {
         await Historial.deleteMany({ _id: { $in: sobrantes.map((s) => s._id) } })
     }

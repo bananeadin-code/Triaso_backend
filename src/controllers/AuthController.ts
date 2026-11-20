@@ -1,28 +1,42 @@
 import type { Request, Response } from 'express'
 import Usuario from '../models/Usuario'
-import { checkPassword, generateJWT, hashPassword } from '../helpers'
+import { checkPassword, compararSinFiltrar, generateJWT, hashPassword } from '../helpers'
+import { limpiarFallos, registrarFallo, segundosDeBloqueo } from '../services/limitadorLogin'
 import { resolverAccesos } from '../config/permisos'
 
 export class AuthController {
     // Login
     static login = async (req: Request, res: Response) => {
         try {
-            const { email, password } = req.body
+            const email = String(req.body.email).toLowerCase().trim()
+            const password = String(req.body.password)
+            const ip = req.ip ?? 'desconocida'
 
-            const usuario = await Usuario.findOne({ email })
-            if (!usuario) {
-                return res.status(404).json({ error: 'Usuario no encontrado' })
+            // Demasiados intentos fallidos → esperar (no se revisa la contraseña)
+            const espera = segundosDeBloqueo(email, ip)
+            if (espera > 0) {
+                res.setHeader('Retry-After', String(espera))
+                return res.status(429).json({
+                    error: `Demasiados intentos fallidos. Intenta de nuevo en ${Math.ceil(espera / 60)} minuto(s).`,
+                })
             }
+
+            // Mismo mensaje y mismo tiempo de respuesta exista o no el correo:
+            // así no se puede averiguar qué correos están registrados.
+            const usuario = await Usuario.findOne({ email })
+            const passwordCorrecto = await compararSinFiltrar(password, usuario?.password)
+            if (!usuario || !passwordCorrecto) {
+                registrarFallo(email, ip)
+                return res.status(401).json({ error: 'Correo o contraseña incorrectos' })
+            }
+            limpiarFallos(email, ip)
+
+            // Solo quien SÍ conoce la contraseña llega a saber que la cuenta está desactivada
             if (!usuario.activo) {
                 return res.status(403).json({ error: 'Usuario desactivado' })
             }
 
-            const passwordCorrecto = await checkPassword(password, usuario.password)
-            if (!passwordCorrecto) {
-                return res.status(401).json({ error: 'Contraseña incorrecta' })
-            }
-
-            const token = generateJWT({ id: usuario.id })
+            const token = generateJWT({ id: usuario.id, v: usuario.sesionVersion ?? 0 })
             res.json({ token })
         } catch (error) {
             res.status(500).json({ error: 'Ocurrió un error al iniciar sesión' })
@@ -43,6 +57,8 @@ export class AuthController {
             panel: accesos.panel,
             nav: accesos.nav,
             acceso: accesos.acceso,
+            operaciones: accesos.operaciones,
+            personalizado: accesos.personalizado,
             permisos: accesos.permisos,
         })
     }
@@ -96,12 +112,18 @@ export class AuthController {
             const usuario = await Usuario.findById(req.usuario!.id)
             if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' })
 
+            // 400 (no 401): un 401 haría que el front cerrara la sesión por un simple error de tecleo
             const ok = await checkPassword(actual, usuario.password)
-            if (!ok) return res.status(401).json({ error: 'La contraseña actual no es correcta' })
+            if (!ok) return res.status(400).json({ error: 'La contraseña actual no es correcta' })
 
             usuario.password = await hashPassword(nueva)
+            // Cierra las sesiones abiertas en otros equipos; este equipo recibe un token nuevo
+            usuario.sesionVersion = (usuario.sesionVersion ?? 0) + 1
             await usuario.save()
-            res.json({ mensaje: 'Contraseña actualizada' })
+            res.json({
+                mensaje: 'Contraseña actualizada. Se cerró la sesión en tus otros equipos.',
+                token: generateJWT({ id: usuario.id, v: usuario.sesionVersion }),
+            })
         } catch (error) {
             res.status(500).json({ error: 'Error al cambiar la contraseña' })
         }

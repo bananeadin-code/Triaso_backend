@@ -3,7 +3,6 @@ import { body } from 'express-validator'
 import { MaterialController } from '../controllers/MaterialController'
 import { handleInputErrors } from '../middleware/validation'
 import { authenticate, checkModulo } from '../middleware/auth'
-import { CATEGORIA_IDS } from '../config/categorias'
 
 const router = Router()
 
@@ -19,7 +18,7 @@ router.get('/:id', checkModulo('materiales', 'lectura'), MaterialController.obte
 // Validaciones compartidas de creación/edición
 const validarMaterial = [
     body('concepto').notEmpty().withMessage('El concepto es obligatorio'),
-    body('categoriaPrincipal').isIn(CATEGORIA_IDS).withMessage('Categoría principal no válida'),
+    body('categoriaPrincipal').notEmpty().withMessage('La categoría principal es obligatoria'),
     body('proveedorPrincipal').isMongoId().withMessage('Proveedor principal no válido'),
     body('costoUnitario').isFloat({ min: 0 }).withMessage('El costo unitario debe ser un número positivo'),
     body('costoUSD').optional().isFloat({ min: 0 }).withMessage('El costo USD debe ser un número positivo'),

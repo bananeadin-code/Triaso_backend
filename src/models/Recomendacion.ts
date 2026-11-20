@@ -46,5 +46,8 @@ const RecomendacionSchema: Schema = new Schema(
     { timestamps: true }
 )
 
+// Índice: recomendaciones pendientes
+RecomendacionSchema.index({ estado: 1, createdAt: -1 })
+
 const Recomendacion = mongoose.model<IRecomendacion>('Recomendacion', RecomendacionSchema)
 export default Recomendacion

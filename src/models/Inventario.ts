@@ -6,6 +6,7 @@ export interface IInventario extends Document {
     material: Types.ObjectId
     cantidad: number // stock actual
     ubicacion: string // nota de ubicación dentro del almacén
+    personalizados: Record<string, unknown> // campos personalizados (informativos, ver Configuración)
 }
 
 const InventarioSchema: Schema = new Schema(
@@ -27,6 +28,7 @@ const InventarioSchema: Schema = new Schema(
             trim: true,
             default: '',
         },
+        personalizados: { type: Schema.Types.Mixed, default: {} },
     },
     { timestamps: true }
 )

@@ -2,7 +2,9 @@ import type { Request, Response } from 'express'
 import Equipo, { IEquipo } from '../models/Equipo'
 import Componente from '../models/Componente'
 import { registrarHistorial } from '../services/historial'
-import { CATEGORIAS } from '../config/categorias'
+import { diffPersonalizados, limpiarPersonalizados } from '../services/camposPersonalizados'
+import { getCategoriasConfig } from '../models/Configuracion'
+import { efectivo, mapaPrincipal } from '../services/moneda'
 
 type LineaPlana = { componente: string; variacion: string; cantidad: number }
 type CompInfo = { concepto: string; variaciones: Map<string, string> }
@@ -52,9 +54,15 @@ export async function construirBOM(equipo: IEquipo) {
     const componentes = await Componente.find({ _id: { $in: idsComponentes } })
     const mapa = new Map(componentes.map((c) => [String(c._id), c]))
 
+    // Moneda principal de cada material: un material cuesta en UNA sola moneda.
+    const idsMat = componentes.flatMap((c) => c.variaciones.flatMap((v) => v.materiales.map((m) => m.material)))
+    const principal = await mapaPrincipal(idsMat)
+
+    // Categorías configuradas (nombre editable por la empresa)
+    const cats = await getCategoriasConfig()
     // Acumulador del resumen por categoría
     const acumulado: Record<string, { mxn: number; usd: number }> = {}
-    CATEGORIAS.forEach((c) => (acumulado[c.id] = { mxn: 0, usd: 0 }))
+    cats.forEach((c) => (acumulado[c.id] = { mxn: 0, usd: 0 }))
     let totalMXN = 0
     let totalUSD = 0
 
@@ -64,8 +72,12 @@ export async function construirBOM(equipo: IEquipo) {
         const factor = linea.cantidad || 1
 
         const materiales = (variacion?.materiales ?? []).map((m) => {
-            const importeMXN = +(m.importeMXN * factor).toFixed(2)
-            const importeUSD = +(m.importeUSD * factor).toFixed(2)
+            // Solo la moneda principal cuesta; la otra es dato secundario (no se suma).
+            const p = m.material ? principal.get(String(m.material)) ?? 'mxn' : m.costoUSD > 0 && !m.costoMXN ? 'usd' : 'mxn'
+            const ef = efectivo(p, m.costoMXN, m.costoUSD)
+            const cantEf = +(m.cantidad * factor).toFixed(4)
+            const importeMXN = +(ef.mxn * cantEf).toFixed(2)
+            const importeUSD = +(ef.usd * cantEf).toFixed(2)
 
             // Suma al resumen según la categoría (letra) del material
             if (acumulado[m.tipo]) {
@@ -82,11 +94,11 @@ export async function construirBOM(equipo: IEquipo) {
                 tipo: m.tipo,
                 // Cantidad EFECTIVA (× las unidades de la línea) para que cantidad × costo = importe,
                 // igual que en la cotización. `cantidadUnitaria` conserva la de una sola unidad.
-                cantidad: +(m.cantidad * factor).toFixed(4),
+                cantidad: cantEf,
                 cantidadUnitaria: m.cantidad,
                 unidad: m.unidad,
-                costoMXN: m.costoMXN,
-                costoUSD: m.costoUSD,
+                costoMXN: ef.mxn,
+                costoUSD: ef.usd,
                 paridad: m.paridad,
                 importeMXN,
                 importeUSD,
@@ -104,7 +116,7 @@ export async function construirBOM(equipo: IEquipo) {
         }
     })
 
-    const porCategoria = CATEGORIAS.map((c) => ({
+    const porCategoria = cats.map((c) => ({
         id: c.id,
         nombre: c.nombre,
         mxn: +acumulado[c.id].mxn.toFixed(2),
@@ -131,6 +143,8 @@ export class EquipoController {
                 descripcion: e.descripcion,
                 activo: e.activo,
                 totalLineas: e.lineas.length,
+                personalizados: e.personalizados ?? {},
+                porValidar: !!e.porValidar,
             }))
             res.json(lista)
         } catch (error) {
@@ -152,6 +166,7 @@ export class EquipoController {
                 tipo: equipo.tipo,
                 descripcion: equipo.descripcion,
                 activo: equipo.activo,
+                personalizados: equipo.personalizados ?? {},
                 ...bom,
             })
         } catch (error) {
@@ -163,7 +178,18 @@ export class EquipoController {
         try {
             const { nombre, tipo, descripcion, lineas } = req.body
             const equipo = new Equipo({ nombre, tipo, descripcion, lineas: lineas ?? [] })
+            equipo.personalizados = await limpiarPersonalizados('equipos', req.body.personalizados)
             await equipo.save()
+            await registrarHistorial({
+                usuario: req.usuario?.nombre ?? 'Sistema',
+                tipo: 'equipo',
+                sector: 'bom',
+                accion: 'creo',
+                entidad: equipo.nombre,
+                equipo: equipo._id as never,
+                equipoNombre: equipo.nombre,
+                cambios: ['Alta de equipo'],
+            })
             res.status(201).json({ mensaje: 'Equipo creado correctamente', id: equipo.id })
         } catch (error) {
             res.status(500).json({ error: 'Error al crear el equipo' })
@@ -190,7 +216,29 @@ export class EquipoController {
             if (activo !== undefined) equipo.activo = activo
             if (lineas !== undefined) equipo.lineas = lineas
 
+            // Datos adicionales (informativos; se conservan los de campos ocultos)
+            let cambiosPers: string[] = []
+            if (req.body.personalizados !== undefined) {
+                const persAntes = equipo.personalizados ?? {}
+                equipo.personalizados = await limpiarPersonalizados('equipos', req.body.personalizados, persAntes)
+                equipo.markModified('personalizados')
+                cambiosPers = await diffPersonalizados('equipos', persAntes, equipo.personalizados)
+            }
+
             await equipo.save()
+
+            if (cambiosPers.length > 0) {
+                await registrarHistorial({
+                    usuario: req.usuario?.nombre ?? 'Sistema',
+                    tipo: 'equipo',
+                    sector: 'bom',
+                    accion: 'edito',
+                    entidad: equipo.nombre,
+                    equipo: equipo._id as never,
+                    equipoNombre: equipo.nombre,
+                    cambios: cambiosPers,
+                })
+            }
 
             // Historial: cambios a la composición del equipo (agregar/quitar componentes, variación, cantidad)
             if (lineas !== undefined) {
@@ -215,6 +263,9 @@ export class EquipoController {
                 await registrarHistorial({
                     usuario: req.usuario?.nombre ?? 'Sistema',
                     tipo: 'equipo',
+                    sector: 'bom',
+                    accion: 'edito',
+                    entidad: equipo.nombre,
                     equipo: equipo._id as never,
                     equipoNombre: equipo.nombre,
                     equiposAfectados: [{ equipo: equipo._id as never, nombre: equipo.nombre }],
@@ -244,6 +295,9 @@ export class EquipoController {
             await registrarHistorial({
                 usuario: req.usuario?.nombre ?? 'Sistema',
                 tipo: 'equipo',
+                sector: 'bom',
+                accion: 'elimino',
+                entidad: nombre,
                 equipoNombre: nombre,
                 cambios: [
                     `Se ELIMINÓ el equipo "${nombre}" con toda su composición (${totalLineas} componente(s) en su BOM)`,

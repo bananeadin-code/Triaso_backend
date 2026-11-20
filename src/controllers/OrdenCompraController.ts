@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express'
-import { Types } from 'mongoose'
+import { Types, type PipelineStage } from 'mongoose'
+import { leerPaginacion, regexBusqueda, respuestaPaginada } from '../helpers/paginacion'
 import OrdenCompra, { IOrdenItem } from '../models/OrdenCompra'
 import Proveedor from '../models/Proveedor'
 import Material from '../models/Material'
@@ -7,66 +8,159 @@ import Recomendacion from '../models/Recomendacion'
 import Inventario from '../models/Inventario'
 import { propagarCostoDesdeOrden } from '../services/sincronizarCostos'
 import { equiposAfectadosPorMaterial, registrarHistorial } from '../services/historial'
+import { registrarMovimiento } from '../services/kardex'
+import { principalDe } from '../services/moneda'
+import { limpiarPersonalizados } from '../services/camposPersonalizados'
+import { getPrefijoFolio } from '../models/Configuracion'
 import { generarTicketPDF } from '../services/ticketPDF'
 import { enviarCorreoOrden } from '../services/email'
 
-// Genera el siguiente folio (OC0001, OC0002…)
+// Genera el siguiente folio de orden (prefijo configurable, ej. OC0001)
 async function generarFolio() {
-    const ordenes = await OrdenCompra.find({ folio: /^OC\d+$/ }).select('folio')
+    const pref = await getPrefijoFolio('orden')
+    const ordenes = await OrdenCompra.find({ folio: new RegExp(`^${pref}\\d+$`) }).select('folio')
     let max = 0
     for (const o of ordenes) {
-        const n = parseInt(o.folio.slice(2), 10)
+        const n = parseInt(o.folio.slice(pref.length), 10)
         if (!isNaN(n) && n > max) max = n
     }
-    return `OC${(max + 1).toString().padStart(4, '0')}`
+    return `${pref}${(max + 1).toString().padStart(4, '0')}`
 }
 
 // Normaliza los renglones: toma snapshots del catálogo y calcula importes.
-async function normalizarItems(items: IOrdenItem[]): Promise<{ items: IOrdenItem[]; subtotal: number }> {
-    if (!Array.isArray(items)) return { items: [], subtotal: 0 }
+async function normalizarItems(
+    items: IOrdenItem[]
+): Promise<{ items: IOrdenItem[]; subtotal: number; subtotalUSD: number }> {
+    if (!Array.isArray(items)) return { items: [], subtotal: 0, subtotalUSD: 0 }
 
     const ids = items.map((i) => (i.material ? String(i.material) : '')).filter(Boolean)
     const materiales = await Material.find({ _id: { $in: ids } })
     const mapa = new Map(materiales.map((m) => [String(m._id), m]))
 
     let subtotal = 0
+    let subtotalUSD = 0
     const norm = items.map((i) => {
         const ref = i.material ? mapa.get(String(i.material)) : undefined
         const cantidad = Number(i.cantidad) || 0
-        const costoUnitario = i.costoUnitario !== undefined ? Number(i.costoUnitario) : (ref?.costoUnitario ?? 0)
+        // Un renglón se compra en UNA sola moneda: la indicada, o la principal del material.
+        const moneda: 'mxn' | 'usd' =
+            i.moneda === 'usd' || i.moneda === 'mxn' ? i.moneda : ref ? principalDe(ref) : 'mxn'
+        // El costo va SOLO en su moneda; el otro queda en 0 (no se duplica el costeo).
+        let costoUnitario = 0
+        let costoUnitarioUSD = 0
+        if (moneda === 'mxn') {
+            costoUnitario = i.costoUnitario !== undefined ? Number(i.costoUnitario) : ref?.costoUnitario ?? 0
+        } else {
+            costoUnitarioUSD = i.costoUnitarioUSD !== undefined ? Number(i.costoUnitarioUSD) : ref?.costoUSD ?? 0
+        }
         const importe = +(cantidad * costoUnitario).toFixed(2)
+        const importeUSD = +(cantidad * costoUnitarioUSD).toFixed(2)
         subtotal += importe
+        subtotalUSD += importeUSD
         return {
             ...(i._id ? { _id: i._id } : {}),
             material: i.material,
             clave: i.clave || ref?.clave || '',
             concepto: i.concepto || ref?.concepto || '',
             cantidad,
+            moneda,
             costoUnitario,
             importe,
+            costoUnitarioUSD,
+            importeUSD,
         }
     })
-    return { items: norm, subtotal: +subtotal.toFixed(2) }
+    return { items: norm, subtotal: +subtotal.toFixed(2), subtotalUSD: +subtotalUSD.toFixed(2) }
+}
+
+// Propaga a todo el sistema (catálogo + componentes) los costos de los materiales indicados,
+// tomando el costo del renglón de la orden. Significa que el precio cambió DEFINITIVAMENTE
+// con el proveedor → queda en el historial. Se usa al crear y al editar una orden.
+async function aplicarCostosGlobales(
+    orden: InstanceType<typeof OrdenCompra>,
+    materialesGlobal: unknown,
+    usuario: string
+) {
+    if (!Array.isArray(materialesGlobal)) return
+    for (const id of materialesGlobal) {
+        const it = orden.items.find((x) => String(x.material) === String(id))
+        if (!it) continue
+
+        const mat = await Material.findById(id).select('clave concepto costoUnitario costoUSD')
+        const antesMXN = mat?.costoUnitario ?? 0
+        const antesUSD = mat?.costoUSD ?? 0
+
+        // Propaga SOLO la moneda en que se compró (no pisa el precio secundario del material)
+        if (it.moneda === 'usd') {
+            await propagarCostoDesdeOrden(id, undefined, it.costoUnitarioUSD)
+        } else {
+            await propagarCostoDesdeOrden(id, it.costoUnitario, undefined)
+        }
+
+        const origen = `actualizado en todo el sistema desde la orden ${orden.folio} (${orden.proveedorSnap?.codigo ?? 'proveedor'})`
+        const cambios: string[] = []
+        if (mat && it.moneda !== 'usd' && antesMXN !== it.costoUnitario) {
+            cambios.push(`Costo MXN: $${antesMXN.toFixed(2)} → $${it.costoUnitario.toFixed(2)} · ${origen}`)
+        }
+        if (mat && it.moneda === 'usd' && antesUSD !== it.costoUnitarioUSD) {
+            cambios.push(`Costo USD: US$${antesUSD.toFixed(2)} → US$${it.costoUnitarioUSD.toFixed(2)} · ${origen}`)
+        }
+        if (mat && cambios.length > 0) {
+            await registrarHistorial({
+                usuario,
+                tipo: 'material',
+                sector: 'compras',
+                accion: 'edito',
+                entidad: `${mat.clave} · ${mat.concepto}`,
+                material: mat._id as never,
+                materialClave: mat.clave,
+                materialConcepto: mat.concepto,
+                equiposAfectados: await equiposAfectadosPorMaterial(id),
+                cambios,
+                sensible: true,
+            })
+        }
+    }
 }
 
 export class OrdenCompraController {
+    // Listado de órdenes. Filtros opcionales: q (folio, proveedor, razón social, cotización
+    // de origen) · estado. Con ?pagina=N responde paginado; sin él, la lista completa (panel).
+    // Se calcula en la base de datos: los renglones de cada orden no viajan, solo su conteo.
     static obtenerOrdenes = async (req: Request, res: Response) => {
         try {
-            const ordenes = await OrdenCompra.find().sort({ createdAt: -1 })
-            const lista = ordenes.map((o) => ({
-                _id: o.id,
-                folio: o.folio,
-                proveedor: o.proveedorSnap?.codigo || '',
-                razonSocial: o.proveedorSnap?.razonSocial || '',
-                estado: o.estado,
-                totalItems: o.items.length,
-                presupuestoEstimado: o.presupuestoEstimado,
-                costoRealTotal: o.costoRealTotal,
-                correoEnviado: o.correoEnviado,
-                folioCotizacion: o.folioCotizacion,
-                createdAt: o.get('createdAt'),
-            }))
-            res.json(lista)
+            const f: Record<string, unknown> = {}
+            const rx = regexBusqueda(req.query.q)
+            if (rx)
+                f.$or = [{ folio: rx }, { 'proveedorSnap.codigo': rx }, { 'proveedorSnap.razonSocial': rx }, { folioCotizacion: rx }]
+            if (['borrador', 'enviada', 'confirmada', 'cancelada'].includes(String(req.query.estado)))
+                f.estado = String(req.query.estado)
+
+            const p = leerPaginacion(req)
+            const pipeline: PipelineStage[] = [{ $match: f }, { $sort: { createdAt: -1 } }]
+            if (p) pipeline.push({ $skip: p.saltar }, { $limit: p.limite })
+            pipeline.push({
+                $project: {
+                    folio: 1,
+                    proveedor: { $ifNull: ['$proveedorSnap.codigo', ''] },
+                    razonSocial: { $ifNull: ['$proveedorSnap.razonSocial', ''] },
+                    estado: 1,
+                    totalItems: { $size: { $ifNull: ['$items', []] } },
+                    presupuestoEstimado: 1,
+                    costoRealTotal: 1,
+                    correoEnviado: 1,
+                    folioCotizacion: 1,
+                    creadoPor: 1,
+                    personalizados: { $ifNull: ['$personalizados', {}] },
+                    createdAt: 1,
+                },
+            })
+            const [lista, total] = await Promise.all([
+                OrdenCompra.aggregate(pipeline),
+                p ? OrdenCompra.countDocuments(f) : Promise.resolve(0),
+            ])
+            const items = lista.map((o) => ({ ...o, _id: String(o._id) }))
+            res.json(p ? respuestaPaginada(items, total, p) : items)
         } catch (error) {
             res.status(500).json({ error: 'Error al obtener las órdenes' })
         }
@@ -84,7 +178,7 @@ export class OrdenCompraController {
 
     static crearOrden = async (req: Request, res: Response) => {
         try {
-            const { proveedor, items, presupuestoEstimado, notas, ordenOrigen } = req.body
+            const { proveedor, items, presupuestoEstimado, notas, ordenOrigen, materialesGlobal } = req.body
 
             const prov = await Proveedor.findById(proveedor)
             if (!prov) return res.status(404).json({ error: 'Proveedor no encontrado' })
@@ -107,8 +201,12 @@ export class OrdenCompraController {
                 presupuestoEstimado: presupuestoEstimado !== undefined ? Number(presupuestoEstimado) : subtotal,
                 notas: notas ?? '',
                 ordenOrigen: ordenOrigen || undefined,
+                creadoPor: req.usuario?.nombre ?? '',
+                personalizados: await limpiarPersonalizados('ordenes', req.body.personalizados),
             })
             await orden.save()
+            // Si al crearla se eligió "actualizar en todo el sistema", se propaga igual que al editar
+            await aplicarCostosGlobales(orden, materialesGlobal, req.usuario?.nombre ?? 'Sistema')
             res.status(201).json({ mensaje: 'Orden creada', id: orden.id, folio: orden.folio })
         } catch (error) {
             res.status(500).json({ error: 'Error al crear la orden' })
@@ -133,56 +231,42 @@ export class OrdenCompraController {
                 orden.items = itemsNorm
                 if (presupuestoEstimado === undefined) orden.presupuestoEstimado = subtotal
             } else if (items !== undefined && orden.estado === 'enviada') {
-                // En enviada SOLO se editan los costos de los materiales existentes (cantidades fijas)
-                const costos = new Map((items as { material: string; costoUnitario: number }[]).map((i) => [String(i.material), Number(i.costoUnitario)]))
+                // En enviada SOLO se editan los costos (MXN y/o USD); las cantidades quedan fijas
+                const entrada = items as { material: string; costoUnitario?: number; costoUnitarioUSD?: number }[]
+                const costos = new Map(entrada.map((i) => [String(i.material), i]))
                 let subtotal = 0
                 orden.items = orden.items.map((it) => {
-                    const nuevo = it.material && costos.has(String(it.material)) ? costos.get(String(it.material))! : it.costoUnitario
-                    const importe = +(it.cantidad * nuevo).toFixed(2)
+                    const nuevo = it.material ? costos.get(String(it.material)) : undefined
+                    const costoUnitario =
+                        nuevo?.costoUnitario !== undefined ? Number(nuevo.costoUnitario) : it.costoUnitario
+                    const costoUnitarioUSD =
+                        nuevo?.costoUnitarioUSD !== undefined ? Number(nuevo.costoUnitarioUSD) : it.costoUnitarioUSD
+                    const importe = +(it.cantidad * costoUnitario).toFixed(2)
                     subtotal += importe
                     return {
                         material: it.material,
                         clave: it.clave,
                         concepto: it.concepto,
                         cantidad: it.cantidad,
-                        costoUnitario: nuevo,
+                        moneda: it.moneda,
+                        costoUnitario,
                         importe,
+                        costoUnitarioUSD,
+                        importeUSD: +(it.cantidad * costoUnitarioUSD).toFixed(2),
                     }
                 }) as never
                 if (presupuestoEstimado === undefined) orden.presupuestoEstimado = +subtotal.toFixed(2)
             }
             if (presupuestoEstimado !== undefined) orden.presupuestoEstimado = Number(presupuestoEstimado)
             if (notas !== undefined) orden.notas = notas
+            // Datos adicionales (informativos; se conservan los de campos ocultos)
+            if (req.body.personalizados !== undefined) {
+                orden.personalizados = await limpiarPersonalizados('ordenes', req.body.personalizados, orden.personalizados)
+                orden.markModified('personalizados')
+            }
 
             await orden.save()
-
-            // Propaga a todo el sistema los costos de los materiales seleccionados.
-            // Esto significa que el costo cambió DEFINITIVAMENTE con el proveedor → queda en el historial.
-            if (Array.isArray(materialesGlobal)) {
-                for (const id of materialesGlobal) {
-                    const it = orden.items.find((x) => String(x.material) === String(id))
-                    if (!it) continue
-
-                    const mat = await Material.findById(id).select('clave concepto costoUnitario')
-                    const costoAnterior = mat?.costoUnitario ?? 0
-                    await propagarCostoDesdeOrden(id, it.costoUnitario)
-
-                    if (mat && costoAnterior !== it.costoUnitario) {
-                        await registrarHistorial({
-                            usuario: req.usuario?.nombre ?? 'Sistema',
-                            tipo: 'material',
-                            material: mat._id as never,
-                            materialClave: mat.clave,
-                            materialConcepto: mat.concepto,
-                            equiposAfectados: await equiposAfectadosPorMaterial(id),
-                            cambios: [
-                                `Costo MXN: $${costoAnterior.toFixed(2)} → $${it.costoUnitario.toFixed(2)} · actualizado en todo el sistema desde la orden ${orden.folio} (${orden.proveedorSnap?.codigo ?? 'proveedor'})`,
-                            ],
-                            sensible: true,
-                        })
-                    }
-                }
-            }
+            await aplicarCostosGlobales(orden, materialesGlobal, req.usuario?.nombre ?? 'Sistema')
 
             res.json({ mensaje: 'Orden actualizada' })
         } catch (error) {
@@ -217,7 +301,17 @@ export class OrdenCompraController {
                     const nuevaCant = it.cantidad - faltaReal
                     const importe = +(nuevaCant * it.costoUnitario).toFixed(2)
                     subtotal += importe
-                    return { ...it, cantidad: nuevaCant, importe }
+                    return {
+                        material: it.material,
+                        clave: it.clave,
+                        concepto: it.concepto,
+                        cantidad: nuevaCant,
+                        moneda: it.moneda,
+                        costoUnitario: it.costoUnitario,
+                        importe,
+                        costoUnitarioUSD: it.costoUnitarioUSD,
+                        importeUSD: +(nuevaCant * (it.costoUnitarioUSD ?? 0)).toFixed(2),
+                    }
                 })
                 .filter((it) => it.cantidad > 0)
 
@@ -309,8 +403,11 @@ export class OrdenCompraController {
                         clave: it.clave,
                         concepto: it.concepto,
                         cantidad: recibido,
+                        moneda: it.moneda,
                         costoUnitario: it.costoUnitario,
                         importe,
+                        costoUnitarioUSD: it.costoUnitarioUSD,
+                        importeUSD: +(recibido * (it.costoUnitarioUSD ?? 0)).toFixed(2),
                     }
                 })
                 .filter((it) => it.cantidad > 0)
@@ -320,20 +417,38 @@ export class OrdenCompraController {
                 req.body.costoRealTotal !== undefined ? Number(req.body.costoRealTotal) : +subtotal.toFixed(2)
             orden.estado = 'confirmada'
             orden.confirmadaAt = new Date()
+            orden.confirmadaPor = req.usuario?.nombre ?? ''
             await orden.save()
 
-            // Kardex: suma el stock recibido al inventario
+            // Kardex: suma el stock recibido al inventario y deja el rastro del movimiento
+            const quien = req.usuario?.nombre ?? 'Sistema'
             let stockActualizado = 0
             for (const it of finales) {
                 if (!it.material || it.cantidad <= 0) continue
                 const inv = await Inventario.findOne({ material: it.material })
+                let saldoAnterior = 0
+                let saldoNuevo = it.cantidad
                 if (inv) {
+                    saldoAnterior = inv.cantidad
                     inv.cantidad += it.cantidad
+                    saldoNuevo = inv.cantidad
                     await inv.save()
                 } else {
                     await Inventario.create({ material: it.material, cantidad: it.cantidad, ubicacion: '' })
                 }
                 stockActualizado++
+                await registrarMovimiento({
+                    material: String(it.material),
+                    clave: it.clave,
+                    concepto: it.concepto,
+                    tipo: 'entrada',
+                    cantidad: it.cantidad,
+                    saldoAnterior,
+                    saldoNuevo,
+                    documento: orden.folio,
+                    motivo: `Recepción de la orden ${orden.folio} (${orden.proveedorSnap?.codigo ?? ''})`,
+                    usuario: quien,
+                })
             }
 
             res.json({
@@ -391,6 +506,7 @@ export class OrdenCompraController {
                 ordenOrigen: rec.ordenOrigen,
                 cotizacion: ordenOrigen?.cotizacion,
                 folioCotizacion: ordenOrigen?.folioCotizacion ?? '',
+                creadoPor: req.usuario?.nombre ?? '',
             })
             await orden.save()
 
@@ -430,6 +546,7 @@ export class OrdenCompraController {
 
             orden.estado = 'enviada'
             orden.enviadaAt = new Date()
+            orden.enviadaPor = req.usuario?.nombre ?? ''
 
             // correo: 'no_solicitado' | 'enviado' | 'sin_correo' | 'sin_credenciales' | 'error_envio'
             let correo = 'no_solicitado'
@@ -470,14 +587,33 @@ export class OrdenCompraController {
         }
     }
 
-    // Limpia órdenes completadas (confirmadas) con más de 90 días de antigüedad
-    static limpiarCompletadas = async (req: Request, res: Response) => {
+    // Cancelar una orden (el proveedor no pudo surtir, se desistió de la compra, etc.).
+    // Conserva el registro en vez de borrarlo. No aplica a las ya confirmadas:
+    // esas ya entraron material al inventario y hay que tratarlas por otra vía.
+    static cancelarOrden = async (req: Request, res: Response) => {
         try {
-            const hace90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
-            const r = await OrdenCompra.deleteMany({ estado: 'confirmada', confirmadaAt: { $lt: hace90 } })
-            res.json({ mensaje: 'Órdenes completadas (+90 días) eliminadas', eliminadas: r.deletedCount ?? 0 })
+            const orden = await OrdenCompra.findById(req.params.id)
+            if (!orden) return res.status(404).json({ error: 'Orden no encontrada' })
+
+            if (orden.estado === 'confirmada') {
+                return res.status(409).json({
+                    error: 'No se puede cancelar una orden ya confirmada: su material entró al inventario.',
+                })
+            }
+            if (orden.estado === 'cancelada') {
+                return res.status(409).json({ error: 'La orden ya estaba cancelada' })
+            }
+
+            orden.estado = 'cancelada'
+            const motivo = String(req.body?.motivo ?? '').trim()
+            if (motivo) {
+                orden.notas = orden.notas ? `${orden.notas}\nCancelada: ${motivo}` : `Cancelada: ${motivo}`
+            }
+            await orden.save()
+
+            res.json({ mensaje: `Orden ${orden.folio} cancelada` })
         } catch (error) {
-            res.status(500).json({ error: 'Error al limpiar las órdenes' })
+            res.status(500).json({ error: 'Error al cancelar la orden' })
         }
     }
 

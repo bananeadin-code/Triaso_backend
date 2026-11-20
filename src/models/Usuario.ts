@@ -1,11 +1,10 @@
 import mongoose, { Document, Schema } from 'mongoose'
-import { ROLES, Rol } from '../config/permisos'
+import { ROLES, Rol, AccesoModulo } from '../config/permisos'
 
 export { ROLES }
 export type { Rol }
 
 export interface IPermisos {
-    limpiarHistoriales: boolean
     generarReportes: boolean
 }
 
@@ -15,13 +14,28 @@ export interface IUsuario extends Document {
     password: string
     rol: Rol
     permisos: IPermisos
+    // Si es true, `accesos` reemplaza al paquete del rol (módulo por módulo, CRUD por operación)
+    accesosPersonalizados: boolean
+    accesos?: Map<string, AccesoModulo>
     activo: boolean
+    // Sube al cambiar/restablecer la contraseña: invalida los tokens emitidos antes
+    sesionVersion: number
 }
 
 const PermisosSchema = new Schema<IPermisos>(
     {
-        limpiarHistoriales: { type: Boolean, default: false },
         generarReportes: { type: Boolean, default: false },
+    },
+    { _id: false }
+)
+
+const AccesoSchema = new Schema<AccesoModulo>(
+    {
+        menu: { type: Boolean, default: false },
+        ver: { type: Boolean, default: false },
+        crear: { type: Boolean, default: false },
+        editar: { type: Boolean, default: false },
+        eliminar: { type: Boolean, default: false },
     },
     { _id: false }
 )
@@ -51,11 +65,14 @@ const UsuarioSchema: Schema = new Schema(
             required: true,
         },
         // Permisos transversales (dentro de sus módulos de acceso). admin/operador siempre los tienen.
-        permisos: { type: PermisosSchema, default: () => ({ limpiarHistoriales: false, generarReportes: false }) },
+        permisos: { type: PermisosSchema, default: () => ({ generarReportes: false }) },
+        accesosPersonalizados: { type: Boolean, default: false },
+        accesos: { type: Map, of: AccesoSchema, default: undefined },
         activo: {
             type: Boolean,
             default: true,
         },
+        sesionVersion: { type: Number, default: 0 },
     },
     { timestamps: true }
 )

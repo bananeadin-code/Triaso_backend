@@ -26,15 +26,29 @@ export async function sincComponentesDesdeMaterial(
     }
 }
 
-// Propaga a TODO el sistema (catálogo + componentes) el costo MXN editado desde una orden.
-// Conserva el costo USD del material (las órdenes se manejan en MXN).
-export async function propagarCostoDesdeOrden(materialId: string | Types.ObjectId, costoMXN: number) {
+// Propaga a TODO el sistema (catálogo + componentes) un costo editado fuera del catálogo
+// (desde una orden de compra o desde el detalle de una cotización).
+// MXN y USD son INDEPENDIENTES: se actualiza el que venga definido y el otro se conserva,
+// así ninguno queda atado al otro por una paridad automática.
+export async function propagarCostoDesdeOrden(
+    materialId: string | Types.ObjectId,
+    costoMXN?: number,
+    costoUSD?: number
+) {
     const mat = await Material.findById(materialId)
     if (!mat) return
-    mat.costoUnitario = costoMXN
-    mat.importeMXN = costoMXN
+
+    if (costoMXN !== undefined && !isNaN(Number(costoMXN))) {
+        mat.costoUnitario = Number(costoMXN)
+        mat.importeMXN = Number(costoMXN)
+    }
+    if (costoUSD !== undefined && !isNaN(Number(costoUSD))) {
+        mat.costoUSD = Number(costoUSD)
+        mat.importeUSD = Number(costoUSD)
+    }
     await mat.save()
-    await sincComponentesDesdeMaterial(materialId, costoMXN, mat.costoUSD)
+
+    await sincComponentesDesdeMaterial(materialId, mat.costoUnitario, mat.costoUSD)
 }
 
 // Al editar un componente, empareja el catálogo maestro con los costos de sus materiales

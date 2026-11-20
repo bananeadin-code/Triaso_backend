@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { body } from 'express-validator'
 import { CotizacionController } from '../controllers/CotizacionController'
 import { handleInputErrors } from '../middleware/validation'
-import { authenticate, checkModulo, checkPermiso } from '../middleware/auth'
+import { authenticate, checkModulo } from '../middleware/auth'
 
 const router = Router()
 
@@ -25,25 +25,12 @@ router.post(
 router.post('/:id/ordenes', checkModulo('cotizaciones', 'escritura'), CotizacionController.registrarOrdenes)
 
 // Declarar salida (descuenta del inventario) — solo si todo está completo
-router.post('/:id/salida', checkModulo('cotizaciones', 'escritura'), CotizacionController.declararSalida)
+// Declarar salida es una EDICIÓN de la cotización (cambia su estado), no una alta
+router.post('/:id/salida', checkModulo('cotizaciones', 'editar'), CotizacionController.declararSalida)
 router.put('/:id', checkModulo('cotizaciones', 'escritura'), CotizacionController.actualizarCotizacion)
 
 // Editar inline el costo (catálogo) de un material desde el detalle de la cotización
 router.put('/:id/costo-material', checkModulo('cotizaciones', 'escritura'), CotizacionController.actualizarCostoMaterial)
-
-// Limpiar historiales de cotizaciones — requiere el permiso limpiarHistoriales
-router.delete(
-    '/limpiar/terminadas',
-    checkModulo('cotizaciones', 'escritura'),
-    checkPermiso('limpiarHistoriales'),
-    CotizacionController.limpiarTerminadas
-)
-router.delete(
-    '/limpiar/canceladas',
-    checkModulo('cotizaciones', 'escritura'),
-    checkPermiso('limpiarHistoriales'),
-    CotizacionController.limpiarCanceladas
-)
 
 router.delete('/:id', checkModulo('cotizaciones', 'escritura'), CotizacionController.cancelarCotizacion)
 

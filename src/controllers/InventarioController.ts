@@ -1,6 +1,8 @@
 import type { Request, Response } from 'express'
 import Inventario from '../models/Inventario'
 import Material from '../models/Material'
+import { registrarMovimiento } from '../services/kardex'
+import { limpiarPersonalizados } from '../services/camposPersonalizados'
 
 export class InventarioController {
     // Lista el inventario con los datos del material (clave, concepto)
@@ -38,7 +40,24 @@ export class InventarioController {
             }
 
             const item = new Inventario({ material, cantidad, ubicacion })
+            item.personalizados = await limpiarPersonalizados('inventario', req.body.personalizados)
             await item.save()
+
+            const cant = Number(cantidad) || 0
+            if (cant > 0) {
+                await registrarMovimiento({
+                    material: String(material),
+                    clave: existeMaterial.clave,
+                    concepto: existeMaterial.concepto,
+                    tipo: 'entrada',
+                    cantidad: cant,
+                    saldoAnterior: 0,
+                    saldoNuevo: cant,
+                    documento: 'Carga inicial',
+                    motivo: (req.body.motivo as string) || 'Carga inicial al inventario',
+                    usuario: req.usuario?.nombre ?? 'Sistema',
+                })
+            }
             res.status(201).json({ mensaje: 'Material agregado al inventario', id: item.id })
         } catch (error) {
             res.status(500).json({ error: 'Error al agregar al inventario' })
@@ -53,9 +72,33 @@ export class InventarioController {
                 return res.status(404).json({ error: 'Renglón de inventario no encontrado' })
             }
             const { cantidad, ubicacion } = req.body
-            if (cantidad !== undefined) item.cantidad = cantidad
+            const saldoAnterior = item.cantidad
+            if (cantidad !== undefined) item.cantidad = Number(cantidad)
             if (ubicacion !== undefined) item.ubicacion = ubicacion
+            // Datos adicionales (informativos; se conservan los de campos ocultos)
+            if (req.body.personalizados !== undefined) {
+                item.personalizados = await limpiarPersonalizados('inventario', req.body.personalizados, item.personalizados)
+                item.markModified('personalizados')
+            }
             await item.save()
+
+            // Kárdex: un ajuste MANUAL de stock deja rastro (quién y por qué).
+            // Es la vía clásica de las "pérdidas silenciosas"; aquí queda auditada.
+            const delta = item.cantidad - saldoAnterior
+            if (cantidad !== undefined && delta !== 0) {
+                await registrarMovimiento({
+                    material: String(item.material),
+                    tipo: 'ajuste',
+                    cantidad: Math.abs(delta),
+                    saldoAnterior,
+                    saldoNuevo: item.cantidad,
+                    documento: 'Ajuste manual',
+                    motivo:
+                        (req.body.motivo as string) ||
+                        `Ajuste manual de stock (${delta > 0 ? '+' : ''}${delta})`,
+                    usuario: req.usuario?.nombre ?? 'Sistema',
+                })
+            }
             res.json({ mensaje: 'Inventario actualizado' })
         } catch (error) {
             res.status(500).json({ error: 'Error al actualizar el inventario' })

@@ -23,6 +23,15 @@ router.post(
 )
 
 router.put('/:id', UsuarioController.actualizar)
+
+// Restablecer la contraseña de un usuario (admin)
+router.put(
+    '/:id/password',
+    body('password').isLength({ min: 6 }).withMessage('La contraseña debe tener al menos 6 caracteres'),
+    handleInputErrors,
+    UsuarioController.resetearPassword
+)
+
 router.delete('/:id', UsuarioController.eliminar)
 
 export default router

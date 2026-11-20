@@ -7,8 +7,11 @@ import Equipo from '../models/Equipo'
 import Cotizacion from '../models/Cotizacion'
 import { construirBOM } from './EquipoController'
 import { mapaCostoReal } from './CotizacionController'
+import { getTipoCambio, getEmpresa } from '../models/Configuracion'
 import {
     money,
+    usd,
+    configurarEmpresa,
     reporteCotizacion,
     reporteEquipoBOM,
     reporteInventario,
@@ -33,6 +36,7 @@ const EST_ORDEN: Record<string, string> = {
 export class ReporteController {
     static inventario = async (req: Request, res: Response) => {
         try {
+            configurarEmpresa(await getEmpresa())
             const items = await Inventario.find().populate('material', 'clave concepto categoriaPrincipal')
             const filas = items
                 .map((i) => {
@@ -54,6 +58,7 @@ export class ReporteController {
 
     static materiales = async (req: Request, res: Response) => {
         try {
+            configurarEmpresa(await getEmpresa())
             const mats = await Material.find().populate('proveedorPrincipal', 'codigo').sort({ clave: 1 })
             const filas = mats.map((m) => {
                 const p = m.proveedorPrincipal as unknown as { codigo?: string }
@@ -62,7 +67,11 @@ export class ReporteController {
                     concepto: m.concepto,
                     categoria: m.categoriaPrincipal,
                     proveedor: p?.codigo ?? '—',
-                    costo: money(m.costoUnitario),
+                    // Muestra la(s) moneda(s) en que se compra; "—" si no tiene costo
+                    costo:
+                        [m.costoUnitario > 0 ? money(m.costoUnitario) : '', m.costoUSD > 0 ? usd(m.costoUSD) : '']
+                            .filter(Boolean)
+                            .join(' / ') || '—',
                 }
             })
             enviarPDF(res, await reporteMateriales(filas), 'catalogo-materiales-triaso.pdf')
@@ -73,6 +82,7 @@ export class ReporteController {
 
     static proveedores = async (req: Request, res: Response) => {
         try {
+            configurarEmpresa(await getEmpresa())
             const provs = await Proveedor.find().sort({ codigo: 1 })
             const filas = provs.map((p) => ({
                 codigo: p.codigo,
@@ -89,6 +99,7 @@ export class ReporteController {
 
     static ordenes = async (req: Request, res: Response) => {
         try {
+            configurarEmpresa(await getEmpresa())
             const ordenes = await OrdenCompra.find().sort({ createdAt: -1 })
             const filas = ordenes.map((o) => ({
                 folio: o.folio,
@@ -106,6 +117,7 @@ export class ReporteController {
 
     static equipo = async (req: Request, res: Response) => {
         try {
+            configurarEmpresa(await getEmpresa())
             const equipo = await Equipo.findById(req.params.id)
             if (!equipo) return res.status(404).json({ error: 'Equipo no encontrado' })
             const bom = await construirBOM(equipo)
@@ -118,6 +130,7 @@ export class ReporteController {
 
     static cotizacion = async (req: Request, res: Response) => {
         try {
+            configurarEmpresa(await getEmpresa())
             const cot = await Cotizacion.findById(req.params.id)
             if (!cot) return res.status(404).json({ error: 'Cotización no encontrada' })
             if (cot.estado !== 'surtida') {
@@ -135,6 +148,7 @@ export class ReporteController {
             const real = await mapaCostoReal(cot.id, ids)
 
             let total = 0
+            let totalUSD = 0
             const lineas = cot.lineas.map((l) => ({
                 componenteConcepto: l.componenteConcepto,
                 variacionNombre: l.variacionNombre,
@@ -142,8 +156,11 @@ export class ReporteController {
                 materiales: l.materiales.map((m) => {
                     const r = m.material ? real.get(String(m.material)) : undefined
                     const costoMXN = r ? r.costoRealMXN : m.costoMXN
+                    const costoUSD = r ? r.costoRealUSD : m.costoUSD
                     const importeMXN = +(costoMXN * m.cantidad).toFixed(2)
+                    const importeUSD = +(costoUSD * m.cantidad).toFixed(2)
                     total += importeMXN
+                    totalUSD += importeUSD
                     return {
                         clave: m.clave,
                         concepto: m.concepto,
@@ -151,21 +168,27 @@ export class ReporteController {
                         cantidad: m.cantidad,
                         costoMXN,
                         importeMXN,
-                        importeUSD: m.importeUSD,
+                        costoUSD,
+                        importeUSD,
                         fuente: r?.fuente === 'orden' ? `${r.folio} · ${r.proveedor}` : 'Catálogo',
                     }
                 }),
             }))
 
+            // Total consolidado (único punto de conversión), con el TC congelado de la cotización
+            const tc = cot.tipoCambio && cot.tipoCambio > 0 ? cot.tipoCambio : await getTipoCambio()
+            const consolidadoMXN = +(total + totalUSD * tc).toFixed(2)
+            const consolidadoUSD = +(totalUSD + (tc > 0 ? total / tc : 0)).toFixed(2)
             // Si se fijó un costo real a mano antes de la salida, ese gana sobre el calculado
-            const totalEfectivo = cot.costoManualDefinido ? cot.costoCotizacion : +total.toFixed(2)
+            const totalEfectivo = cot.costoManualDefinido ? cot.costoCotizacion : consolidadoMXN
             const buf = await reporteCotizacion(
                 cot.folio,
                 cot.equipoNombre,
                 cot.contexto,
                 lineas,
                 totalEfectivo,
-                cot.costoManualDefinido
+                cot.costoManualDefinido,
+                consolidadoUSD
             )
             enviarPDF(res, buf, `cotizacion-${cot.folio}.pdf`)
         } catch (error) {

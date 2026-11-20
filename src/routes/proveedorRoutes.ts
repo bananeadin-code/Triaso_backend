@@ -32,6 +32,9 @@ router.put(
     ProveedorController.actualizarProveedor
 )
 
+// Importación en lote desde Excel (upsert por código)
+router.post('/importar', checkModulo('proveedores', 'escritura'), ProveedorController.importarProveedores)
+
 router.delete('/:id', checkModulo('proveedores', 'escritura'), ProveedorController.eliminarProveedor)
 
 export default router

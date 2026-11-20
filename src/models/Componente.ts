@@ -1,5 +1,4 @@
 import mongoose, { Document, Schema, Types } from 'mongoose'
-import { CATEGORIA_IDS } from '../config/categorias'
 
 // Snapshot del proveedor al momento de asignar (no se rompe si cambia el catálogo)
 export interface IProveedorSnap {
@@ -37,6 +36,9 @@ export interface IComponente extends Document {
     descripcion: string
     variaciones: IVariacion[]
     activo: boolean
+    porValidar: boolean // creado por una importación, pendiente de revisión
+    lote?: Types.ObjectId // lote de importación que lo creó
+    personalizados: Record<string, unknown> // campos personalizados (informativos, ver Configuración)
 }
 
 const ProveedorSnapSchema = new Schema<IProveedorSnap>(
@@ -54,7 +56,7 @@ const MaterialAsignadoSchema = new Schema<IMaterialAsignado>(
         clave: { type: String, default: '' },
         concepto: { type: String, required: true },
         proveedor: { type: ProveedorSnapSchema, default: () => ({}) },
-        tipo: { type: String, enum: CATEGORIA_IDS, required: true },
+        tipo: { type: String, required: true }, // id de categoría; validado contra las configuradas
         cantidad: { type: Number, required: true, min: 0 },
         unidad: { type: String, default: 'Pieza' },
         costoMXN: { type: Number, default: 0, min: 0 },
@@ -80,9 +82,16 @@ const ComponenteSchema: Schema = new Schema(
         descripcion: { type: String, default: '', trim: true },
         variaciones: { type: [VariacionSchema], default: [] },
         activo: { type: Boolean, default: true },
+        // Alta hecha por una importación y aún no revisada por una persona (se marca en el catálogo)
+        porValidar: { type: Boolean, default: false },
+        lote: { type: Schema.Types.ObjectId, ref: 'ImportacionLote' },
+        personalizados: { type: Schema.Types.Mixed, default: {} },
     },
     { timestamps: true }
 )
+
+// Índice: qué componentes usan un material (propagación de costos, guarda de borrado)
+ComponenteSchema.index({ 'variaciones.materiales.material': 1 })
 
 const Componente = mongoose.model<IComponente>('Componente', ComponenteSchema)
 export default Componente

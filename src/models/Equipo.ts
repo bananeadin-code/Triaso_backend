@@ -14,6 +14,9 @@ export interface IEquipo extends Document {
     descripcion: string
     lineas: ILineaBOM[]
     activo: boolean
+    porValidar: boolean // creado por una importación, pendiente de revisión
+    lote?: Types.ObjectId // lote de importación que lo creó
+    personalizados: Record<string, unknown> // campos personalizados (informativos, ver Configuración)
 }
 
 const LineaBOMSchema = new Schema<ILineaBOM>(
@@ -32,9 +35,16 @@ const EquipoSchema: Schema = new Schema(
         descripcion: { type: String, default: '', trim: true },
         lineas: { type: [LineaBOMSchema], default: [] },
         activo: { type: Boolean, default: true },
+        // Alta hecha por una importación y aún no revisada por una persona (se marca en el catálogo)
+        porValidar: { type: Boolean, default: false },
+        lote: { type: Schema.Types.ObjectId, ref: 'ImportacionLote' },
+        personalizados: { type: Schema.Types.Mixed, default: {} },
     },
     { timestamps: true }
 )
+
+// Índice: qué equipos usan un componente (historial, guarda de borrado)
+EquipoSchema.index({ 'lineas.componente': 1 })
 
 const Equipo = mongoose.model<IEquipo>('Equipo', EquipoSchema)
 export default Equipo

@@ -9,8 +9,13 @@ export interface IOrdenItem {
     clave: string // snapshot
     concepto: string // snapshot
     cantidad: number
-    costoUnitario: number
-    importe: number // cantidad * costoUnitario
+    // Moneda en la que se COMPRA este material en esta orden ('mxn' o 'usd').
+    // Un material con ambos precios se manda a comprar en una sola; el costeo usa esa.
+    moneda: 'mxn' | 'usd'
+    costoUnitario: number // MXN
+    importe: number // cantidad * costoUnitario (MXN)
+    costoUnitarioUSD: number // USD — independiente del MXN (no se convierte por paridad)
+    importeUSD: number // cantidad * costoUnitarioUSD
 }
 
 // Snapshot fiscal del proveedor (para el ticket/factura)
@@ -47,6 +52,10 @@ export interface IOrdenCompra extends Document {
     notas: string
     enviadaAt?: Date
     confirmadaAt?: Date
+    creadoPor: string // quién creó la orden (snapshot del nombre)
+    enviadaPor: string // quién la marcó como enviada
+    confirmadaPor: string // quién confirmó la recepción
+    personalizados: Record<string, unknown> // campos personalizados (informativos, ver Configuración)
 }
 
 const OrdenItemSchema = new Schema<IOrdenItem>(
@@ -55,8 +64,11 @@ const OrdenItemSchema = new Schema<IOrdenItem>(
         clave: { type: String, default: '' },
         concepto: { type: String, required: true },
         cantidad: { type: Number, required: true, min: 0 },
+        moneda: { type: String, enum: ['mxn', 'usd'], default: 'mxn' },
         costoUnitario: { type: Number, default: 0, min: 0 },
         importe: { type: Number, default: 0 },
+        costoUnitarioUSD: { type: Number, default: 0, min: 0 },
+        importeUSD: { type: Number, default: 0 },
     },
     { _id: true }
 )
@@ -104,9 +116,19 @@ const OrdenCompraSchema: Schema = new Schema(
         notas: { type: String, default: '' },
         enviadaAt: { type: Date },
         confirmadaAt: { type: Date },
+        creadoPor: { type: String, default: '' },
+        enviadaPor: { type: String, default: '' },
+        confirmadaPor: { type: String, default: '' },
+        personalizados: { type: Schema.Types.Mixed, default: {} },
     },
     { timestamps: true }
 )
+
+// Índices: órdenes de una cotización, de un proveedor y listados por estado/fecha
+OrdenCompraSchema.index({ cotizacion: 1 })
+OrdenCompraSchema.index({ proveedor: 1 })
+OrdenCompraSchema.index({ estado: 1, createdAt: -1 })
+OrdenCompraSchema.index({ createdAt: -1 })
 
 const OrdenCompra = mongoose.model<IOrdenCompra>('OrdenCompra', OrdenCompraSchema)
 export default OrdenCompra

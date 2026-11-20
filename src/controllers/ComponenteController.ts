@@ -3,6 +3,7 @@ import Componente, { IVariacion } from '../models/Componente'
 import Material from '../models/Material'
 import Equipo from '../models/Equipo'
 import { registrarHistorial } from '../services/historial'
+import { diffPersonalizados, limpiarPersonalizados } from '../services/camposPersonalizados'
 import { sincMaterialesDesdeComponente } from '../services/sincronizarCostos'
 
 // Compara variaciones/materiales antes vs después y devuelve una lista de cambios legibles.
@@ -158,7 +159,18 @@ export class ComponenteController {
             }
 
             const componente = new Componente({ concepto, descripcion, variaciones: variacionesNorm })
+            componente.personalizados = await limpiarPersonalizados('componentes', req.body.personalizados)
             await componente.save()
+            await registrarHistorial({
+                usuario: req.usuario?.nombre ?? 'Sistema',
+                tipo: 'componente',
+                sector: 'catalogos',
+                accion: 'creo',
+                entidad: componente.concepto,
+                componente: componente._id as never,
+                componenteConcepto: componente.concepto,
+                cambios: ['Alta de componente'],
+            })
             res.status(201).json({ mensaje: 'Componente creado correctamente', id: componente.id })
         } catch (error) {
             res.status(500).json({ error: 'Error al crear el componente' })
@@ -187,6 +199,15 @@ export class ComponenteController {
                 componente.variaciones = variacionesNuevas
             }
 
+            // Datos adicionales (informativos; se conservan los de campos ocultos)
+            let cambiosPers: string[] = []
+            if (req.body.personalizados !== undefined) {
+                const persAntes = componente.personalizados ?? {}
+                componente.personalizados = await limpiarPersonalizados('componentes', req.body.personalizados, persAntes)
+                componente.markModified('personalizados')
+                cambiosPers = await diffPersonalizados('componentes', persAntes, componente.personalizados)
+            }
+
             await componente.save()
 
             // Empareja el catálogo maestro con los costos editados en el componente
@@ -195,19 +216,20 @@ export class ComponenteController {
                 await sincMaterialesDesdeComponente(variacionesNuevas)
             }
 
-            // Registro de historial (solo si hubo cambios en variaciones/concepto)
-            if (variacionesNuevas) {
-                const { cambios, sensible } = diffComponente(
-                    conceptoViejo,
-                    componente.concepto,
-                    variacionesViejas,
-                    variacionesNuevas
-                )
+            // Registro de historial (cambios en variaciones/concepto y en datos adicionales)
+            if (variacionesNuevas || cambiosPers.length > 0) {
+                const { cambios, sensible } = variacionesNuevas
+                    ? diffComponente(conceptoViejo, componente.concepto, variacionesViejas, variacionesNuevas)
+                    : { cambios: [] as string[], sensible: false }
+                cambios.push(...cambiosPers)
                 if (cambios.length > 0) {
                     const equipos = await Equipo.find({ 'lineas.componente': componente._id }).select('nombre')
                     await registrarHistorial({
                         usuario: req.usuario?.nombre ?? 'Sistema',
                         tipo: 'componente',
+                        sector: 'catalogos',
+                        accion: 'edito',
+                        entidad: componente.concepto,
                         componente: componente._id as never,
                         componenteConcepto: componente.concepto,
                         equiposAfectados: equipos.map((e) => ({ equipo: e._id as never, nombre: e.nombre })),
@@ -223,12 +245,34 @@ export class ComponenteController {
         }
     }
 
+    // Eliminar componente — solo si NINGÚN equipo lo tiene en su composición.
+    // (Sin esta guarda, la línea del equipo sobrevivía vacía y el total del BOM
+    //  bajaba en silencio.) Las cotizaciones no bloquean: llevan su propio snapshot.
     static eliminarComponente = async (req: Request, res: Response) => {
         try {
             const componente = await Componente.findById(req.params.id)
             if (!componente) {
                 return res.status(404).json({ error: 'Componente no encontrado' })
             }
+
+            const equipos = await Equipo.find({ 'lineas.componente': componente.id }).select('nombre')
+            if (equipos.length > 0) {
+                const nombres = equipos.map((e) => e.nombre).join(', ')
+                return res.status(409).json({
+                    error: `No se puede eliminar "${componente.concepto}": forma parte del BOM de ${equipos.length} equipo(s): ${nombres}.`,
+                })
+            }
+
+            await registrarHistorial({
+                usuario: req.usuario?.nombre ?? 'Sistema',
+                tipo: 'componente',
+                sector: 'catalogos',
+                accion: 'elimino',
+                entidad: componente.concepto,
+                componenteConcepto: componente.concepto,
+                cambios: ['Componente eliminado del catálogo'],
+                sensible: true,
+            })
             await componente.deleteOne()
             res.json({ mensaje: 'Componente eliminado correctamente' })
         } catch (error) {
