@@ -16,6 +16,8 @@ export interface IUsuario extends Document {
     rol: Rol
     permisos: IPermisos
     activo: boolean
+    sesionVersion: number
+    debeCambiarPassword: boolean
 }
 
 const PermisosSchema = new Schema<IPermisos>(
@@ -56,6 +58,10 @@ const UsuarioSchema: Schema = new Schema(
             type: Boolean,
             default: true,
         },
+        // Se incrementa al cambiar contraseña o desactivar: invalida los tokens emitidos antes
+        sesionVersion: { type: Number, default: 0 },
+        // Contraseña asignada por otra persona (alta, restablecimiento, recuperación): debe cambiarla al entrar
+        debeCambiarPassword: { type: Boolean, default: false },
     },
     { timestamps: true }
 )

@@ -51,7 +51,7 @@ async function main() {
 
     // ===== 3) Cotizador NO puede tocar la composición =====
     console.log('\n=== 3) COTIZADOR vs COMPOSICIÓN DE EQUIPOS ===')
-    const c = await j(await fetch(`${BASE}/usuarios`, { method: 'POST', headers: A, body: JSON.stringify({ nombre: 'Cot Test', email: 't_cot2@triaso.com', password: 'clave123', rol: 'cotizador', permisos: { limpiarHistoriales: false, generarReportes: false } }) }))
+    const c = await j(await fetch(`${BASE}/usuarios`, { method: 'POST', headers: A, body: JSON.stringify({ nombre: 'Cot Test', email: 't_cot2@triaso.com', password: 'clave123', rol: 'cotizador', debeCambiarPassword: false, permisos: { limpiarHistoriales: false, generarReportes: false } }) }))
     const C = (await login('t_cot2@triaso.com', 'clave123'))!
     const eq = (await j(await fetch(`${BASE}/equipos`, { headers: C })))[0]
     const perfil = await j(await fetch(`${BASE}/auth/perfil`, { headers: C }))

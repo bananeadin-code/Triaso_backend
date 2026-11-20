@@ -2,6 +2,7 @@ import type { Request, Response } from 'express'
 import Usuario from '../models/Usuario'
 import { checkPassword, generateJWT, hashPassword } from '../helpers'
 import { resolverAccesos } from '../config/permisos'
+import { limpiarFallos, minutosBloqueo, registrarFallo } from '../middleware/limiteLogin'
 
 export class AuthController {
     // Login
@@ -9,20 +10,24 @@ export class AuthController {
         try {
             const { email, password } = req.body
 
-            const usuario = await Usuario.findOne({ email })
-            if (!usuario) {
-                return res.status(404).json({ error: 'Usuario no encontrado' })
+            const espera = minutosBloqueo(req.ip, email)
+            if (espera > 0) {
+                return res.status(429).json({ error: `Demasiados intentos fallidos. Intenta de nuevo en ${espera} min.` })
+            }
+
+            // Mismo mensaje para correo inexistente o contraseña errónea: no revela qué cuentas existen
+            const usuario = await Usuario.findOne({ email: String(email).toLowerCase().trim() })
+            const passwordCorrecto = usuario ? await checkPassword(password, usuario.password) : false
+            if (!usuario || !passwordCorrecto) {
+                registrarFallo(req.ip, email)
+                return res.status(401).json({ error: 'Correo o contraseña incorrectos' })
             }
             if (!usuario.activo) {
                 return res.status(403).json({ error: 'Usuario desactivado' })
             }
+            limpiarFallos(req.ip, email)
 
-            const passwordCorrecto = await checkPassword(password, usuario.password)
-            if (!passwordCorrecto) {
-                return res.status(401).json({ error: 'Contraseña incorrecta' })
-            }
-
-            const token = generateJWT({ id: usuario.id })
+            const token = generateJWT({ id: usuario.id, v: usuario.sesionVersion ?? 0 })
             res.json({ token })
         } catch (error) {
             res.status(500).json({ error: 'Ocurrió un error al iniciar sesión' })
@@ -39,6 +44,7 @@ export class AuthController {
             email: u.email,
             rol: u.rol,
             activo: u.activo,
+            debeCambiarPassword: !!u.debeCambiarPassword,
             nombreRol: accesos.nombreRol,
             panel: accesos.panel,
             nav: accesos.nav,
@@ -90,6 +96,9 @@ export class AuthController {
             if (!actual || !nueva) {
                 return res.status(400).json({ error: 'Debes indicar la contraseña actual y la nueva' })
             }
+            if (String(nueva) === String(actual)) {
+                return res.status(400).json({ error: 'La nueva contraseña debe ser distinta a la actual' })
+            }
             if (String(nueva).length < 6) {
                 return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres' })
             }
@@ -100,8 +109,12 @@ export class AuthController {
             if (!ok) return res.status(401).json({ error: 'La contraseña actual no es correcta' })
 
             usuario.password = await hashPassword(nueva)
+            usuario.sesionVersion = (usuario.sesionVersion ?? 0) + 1 // cierra las sesiones en otros equipos
+            usuario.debeCambiarPassword = false
             await usuario.save()
-            res.json({ mensaje: 'Contraseña actualizada' })
+            // Token nuevo para que esta sesión siga abierta
+            const token = generateJWT({ id: usuario.id, v: usuario.sesionVersion })
+            res.json({ mensaje: 'Contraseña actualizada', token })
         } catch (error) {
             res.status(500).json({ error: 'Error al cambiar la contraseña' })
         }

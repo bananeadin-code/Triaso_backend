@@ -14,6 +14,7 @@ export const checkPassword = async (enteredPassword: string, storedHash: string)
 // --- JWT ---
 type JWTPayload = {
     id: string
+    v: number // versión de sesión del usuario
 }
 
 export const generateJWT = (payload: JWTPayload) => {

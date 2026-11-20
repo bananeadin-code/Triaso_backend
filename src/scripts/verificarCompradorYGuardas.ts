@@ -30,7 +30,7 @@ async function main() {
 
     // ===== Rol Comprador =====
     console.log('\n=== ROL COMPRADOR ===')
-    const c = await j(await fetch(`${BASE}/usuarios`, { method: 'POST', headers: A, body: JSON.stringify({ nombre: 'Comprador Demo', email: 't_comprador@triaso.com', password: 'clave123', rol: 'comprador', permisos: { limpiarHistoriales: false, generarReportes: true } }) }))
+    const c = await j(await fetch(`${BASE}/usuarios`, { method: 'POST', headers: A, body: JSON.stringify({ nombre: 'Comprador Demo', email: 't_comprador@triaso.com', password: 'clave123', rol: 'comprador', debeCambiarPassword: false, permisos: { limpiarHistoriales: false, generarReportes: true } }) }))
     const H = (await login('t_comprador@triaso.com', 'clave123'))!
     const p = await j(await fetch(`${BASE}/auth/perfil`, { headers: H }))
     console.log('Menú:', JSON.stringify(p.nav), '| panel:', p.panel)
