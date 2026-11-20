@@ -53,6 +53,7 @@ export class AuthController {
             email: u.email,
             rol: u.rol,
             activo: u.activo,
+            debeCambiarPassword: !!u.debeCambiarPassword,
             nombreRol: accesos.nombreRol,
             panel: accesos.panel,
             nav: accesos.nav,
@@ -106,6 +107,9 @@ export class AuthController {
             if (!actual || !nueva) {
                 return res.status(400).json({ error: 'Debes indicar la contraseña actual y la nueva' })
             }
+            if (String(nueva) === String(actual)) {
+                return res.status(400).json({ error: 'La nueva contraseña debe ser distinta a la actual' })
+            }
             if (String(nueva).length < 6) {
                 return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres' })
             }
@@ -117,13 +121,12 @@ export class AuthController {
             if (!ok) return res.status(400).json({ error: 'La contraseña actual no es correcta' })
 
             usuario.password = await hashPassword(nueva)
-            // Cierra las sesiones abiertas en otros equipos; este equipo recibe un token nuevo
-            usuario.sesionVersion = (usuario.sesionVersion ?? 0) + 1
+            usuario.sesionVersion = (usuario.sesionVersion ?? 0) + 1 // cierra las sesiones en otros equipos
+            usuario.debeCambiarPassword = false
             await usuario.save()
-            res.json({
-                mensaje: 'Contraseña actualizada. Se cerró la sesión en tus otros equipos.',
-                token: generateJWT({ id: usuario.id, v: usuario.sesionVersion }),
-            })
+            // Token nuevo para que esta sesión siga abierta
+            const token = generateJWT({ id: usuario.id, v: usuario.sesionVersion })
+            res.json({ mensaje: 'Contraseña actualizada. Se cerró la sesión en tus otros equipos.', token })
         } catch (error) {
             res.status(500).json({ error: 'Error al cambiar la contraseña' })
         }

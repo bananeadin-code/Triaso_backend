@@ -33,7 +33,7 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
         const decoded = jwt.verify(token, secret)
         if (typeof decoded === 'object' && decoded.id) {
             const usuario = await Usuario.findById(decoded.id).select(
-                '_id nombre email rol permisos accesosPersonalizados accesos activo sesionVersion'
+                '_id nombre email rol permisos accesosPersonalizados accesos activo sesionVersion debeCambiarPassword'
             )
             if (!usuario) {
                 return res.status(401).json({ error: 'Token no válido' })
@@ -44,6 +44,10 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
             }
             if (!usuario.activo) {
                 return res.status(403).json({ error: 'Usuario desactivado' })
+            }
+            // Con contraseña temporal solo puede consultar/editar su perfil y cambiar la contraseña
+            if (usuario.debeCambiarPassword && !req.originalUrl.startsWith('/api/auth/perfil')) {
+                return res.status(403).json({ error: 'Debes cambiar tu contraseña antes de continuar', codigo: 'CAMBIAR_PASSWORD' })
             }
             req.usuario = usuario
             return next()

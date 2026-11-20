@@ -26,7 +26,7 @@ export const compararSinFiltrar = async (enteredPassword: string, storedHash?: s
 // todos los tokens emitidos antes dejan de servir (cierra sesiones abiertas en otros equipos).
 type JWTPayload = {
     id: string
-    v: number
+    v: number // versión de sesión del usuario
 }
 
 // Vigencia de la sesión (configurable; por defecto una jornada laboral)

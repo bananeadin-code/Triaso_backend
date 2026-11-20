@@ -33,7 +33,7 @@ async function main() {
     ]
     const ids: Record<string, string> = {}
     for (const d of defs) {
-        const r = await fetch(`${BASE}/usuarios`, { method: 'POST', headers: A, body: JSON.stringify({ nombre: d.rol, email: d.email, password: 'clave123', rol: d.rol, permisos: d.permisos }) })
+        const r = await fetch(`${BASE}/usuarios`, { method: 'POST', headers: A, body: JSON.stringify({ nombre: d.rol, email: d.email, password: 'clave123', rol: d.rol, debeCambiarPassword: false, permisos: d.permisos }) })
         const body = await r.json()
         ids[d.rol] = body.id ?? ''
         console.log(`Crear ${d.rol}: ${r.status}`)

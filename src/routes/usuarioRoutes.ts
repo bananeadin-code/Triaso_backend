@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { body } from 'express-validator'
+import { body, param } from 'express-validator'
 import { UsuarioController } from '../controllers/UsuarioController'
 import { handleInputErrors } from '../middleware/validation'
 import { authenticate, soloAdmin } from '../middleware/auth'
@@ -11,6 +11,7 @@ const router = Router()
 router.use(authenticate, soloAdmin)
 
 router.get('/', UsuarioController.listar)
+router.get('/bitacora', UsuarioController.bitacora)
 
 router.post(
     '/',
@@ -22,16 +23,23 @@ router.post(
     UsuarioController.crear
 )
 
-router.put('/:id', UsuarioController.actualizar)
+const idValido = [param('id').isMongoId().withMessage('ID no válido'), handleInputErrors]
 
-// Restablecer la contraseña de un usuario (admin)
+router.put(
+    '/:id',
+    idValido,
+    body('rol').optional().isIn(ROLES).withMessage('Rol no válido'),
+    body('activo').optional().isBoolean({ strict: true }).withMessage('Estado no válido'),
+    handleInputErrors,
+    UsuarioController.actualizar
+)
 router.put(
     '/:id/password',
+    idValido,
     body('password').isLength({ min: 6 }).withMessage('La contraseña debe tener al menos 6 caracteres'),
     handleInputErrors,
-    UsuarioController.resetearPassword
+    UsuarioController.restablecerPassword
 )
-
-router.delete('/:id', UsuarioController.eliminar)
+router.delete('/:id', idValido, UsuarioController.eliminar)
 
 export default router
