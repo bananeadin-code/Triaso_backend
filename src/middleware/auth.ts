@@ -38,12 +38,14 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
             if (!usuario) {
                 return res.status(401).json({ error: 'Token no válido' })
             }
+            // Primero "desactivado": al desactivar también sube sesionVersion, y así el usuario
+            // recibe el motivo real (el front cierra sesión en ambos casos)
+            if (!usuario.activo) {
+                return res.status(403).json({ error: 'Usuario desactivado' })
+            }
             // Token emitido antes de un cambio/restablecimiento de contraseña (o de formato viejo, sin `v`)
             if (typeof decoded.v !== 'number' || decoded.v !== (usuario.sesionVersion ?? 0)) {
                 return res.status(401).json({ error: 'Sesión expirada, vuelve a iniciar sesión' })
-            }
-            if (!usuario.activo) {
-                return res.status(403).json({ error: 'Usuario desactivado' })
             }
             // Con contraseña temporal solo puede consultar/editar su perfil y cambiar la contraseña
             if (usuario.debeCambiarPassword && !req.originalUrl.startsWith('/api/auth/perfil')) {
